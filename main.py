@@ -20,9 +20,11 @@ def multiquadric_kernel(r, epsilon):
 # 这个函数现在接受预先计算好的矩阵和索引，使其与JIT兼容
 
 
-@jax.jit
+# @jax.jit
 def rbf_2d(inv_phi: jnp.ndarray, new_phi: jnp.ndarray, know_values: jnp.ndarray):
-    weights = inv_phi @ know_values.reshape(-1)
+    # weights = inv_phi @ know_values.reshape(-1)
+    weights = jnp.linalg.solve(inv_phi, know_values.reshape(-1))
+    print("weight", weights)
     # .flatten()
     reconstructed_values = new_phi @ weights
     return reconstructed_values
@@ -33,12 +35,44 @@ def solve_phi(
     known_coords: jnp.ndarray, unknown_coords: jnp.ndarray, epsilon: float
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     dist_known = jnp.linalg.norm(known_coords[:, None, :] - known_coords[None, :, :], axis=-1)
-    phi = multiquadric_kernel(dist_known, epsilon)
+    phi = multiquadric_kernel(dist_known, epsilon) + 1e-4 * jnp.eye(known_coords.shape[0])
     inv_phi = jnp.linalg.inv(phi)  # 预计算逆矩阵
 
     new_dist = jnp.linalg.norm(unknown_coords[:, None, :] - known_coords[None, :, :], axis=-1)
     new_phi = multiquadric_kernel(new_dist, epsilon)
-    return inv_phi, new_phi
+    return phi, inv_phi, new_phi
+
+@jax.jit
+def solve(known_coords: jnp.ndarray, unknown_coords: jnp.ndarray, know_values: jnp.ndarray, epsilon: float):
+
+    # Calculate squared Euclidean distances for known_coords vs known_coords
+    # known_coords shape: (N, D)
+    sum_known_sq = jnp.sum(known_coords**2, axis=1, keepdims=True)  # Shape: (N, 1)
+    dot_known = jnp.matmul(known_coords, known_coords.T)  # Shape: (N, N)
+    # dist_known_sq = sum_A_sq - 2*A@B.T + sum_B_sq.T
+    dist_known_sq = sum_known_sq - 2 * dot_known + sum_known_sq.T  # Shape: (N, N)
+    # Add a small epsilon or ensure non-negativity for numerical stability before sqrt
+    dist_known = jnp.sqrt(jnp.maximum(0.0, dist_known_sq))  # Shape: (N, N)
+
+    phi = multiquadric_kernel(dist_known, epsilon)  # Shape: (N, N)
+    # inv_phi = jnp.linalg.inv(phi)  # Shape: (N, N)
+
+    # Calculate squared Euclidean distances for unknown_coords vs known_coords
+    # unknown_coords shape: (M, D)
+    sum_unknown_sq = jnp.sum(unknown_coords**2, axis=1, keepdims=True)  # Shape: (M, 1)
+    dot_new = jnp.matmul(unknown_coords, known_coords.T)  # Shape: (M, N)
+    # new_dist_sq = sum_unknown_sq - 2*dot_new + sum_known_sq.T
+    # sum_known_sq.T has shape (1, N)
+    new_dist_sq = sum_unknown_sq - 2 * dot_new + sum_known_sq.T  # Shape: (M, N)
+    new_dist = jnp.sqrt(jnp.maximum(0.0, new_dist_sq))  # Shape: (M, N)
+
+    new_phi = multiquadric_kernel(new_dist, epsilon)  # Shape: (M, N)
+
+    weights = jnp.linalg.solve(phi, know_values.reshape(-1))  # 求解权重
+    # weights = inv_phi @ know_values.reshape(-1)
+    # .flatten()
+    reconstructed_values = new_phi @ weights
+    return reconstructed_values
 
 
 def solve_coords(dim_s, dim_t):
@@ -47,43 +81,76 @@ def solve_coords(dim_s, dim_t):
 
 
 def rbf_2x2d_interpolate_3d_vmap(iq_data: jnp.ndarray, epsilon: float) -> jnp.ndarray:
-    x_dim, z_dim, t_dim = iq_data.shape
+    z_dim, x_dim, t_dim = iq_data.shape
 
     t_mask = jnp.isnan(iq_data[0, 0, :])
     unknown_t, known_t = jnp.where(t_mask)[0], jnp.where(~t_mask)[0]
 
     print("开始并行处理 x-t 平面...")
+    known_data = iq_data[:, :, known_t]
+    # unknown_data_shape = iq_data[:, :, unknown_t].shape
+    # print("un", unknown_data_shape)
+    # --- 3. 处理 z-t 平面 (并行处理所有x切片) ---
+    # known_value_zt_flat = iq_data[:, :, known_t].reshape(x_dim, -1)  # -> (z, x, t)
+    # result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_zt, new_phi_zt, known_data)
+    # result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_zt, new_phi_zt, known_value_zt_flat)
+    # .block_until_ready()
 
-    all_coords_xt = solve_coords(x_dim, t_dim)
+    # result_zt_flat = jax.lax.map(
+    #     lambda x: solve(known_coords_zt, unknown_coords_zt, x, epsilon),
+    #     known_data,
+    #     batch_size=5,
+    # )
+
+
+    all_coords_xt = solve_coords(x_dim, t_dim).astype(jnp.float32) / jnp.array([x_dim, t_dim], dtype=jnp.float32)
     known_coords_xt = all_coords_xt[:, known_t].reshape(-1, 2)
     unknown_coords_xt = all_coords_xt[:, unknown_t].reshape(-1, 2)
     # known_value_xt_flat = jnp.transpose(iq_data[:, :, known_t], (1, 0, 2)).reshape(z_dim, -1)  # -> (z, x, t)
     # b. 预计算昂贵的RBF矩阵 (只计算一次)
-    inv_phi_xt, new_phi_xt = solve_phi(known_coords_xt, unknown_coords_xt, epsilon)
-    result_xt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 1))(inv_phi_xt, new_phi_xt, iq_data[:, :, known_t])
+    phi, inv_phi_xt, new_phi_xt = solve_phi(known_coords_xt, unknown_coords_xt, epsilon)
+    print(phi)
+    # result_xt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 1))(inv_phi_xt, new_phi_xt, known_data)
+    a, b = solve_coords(x_dim, t_dim)[:, known_t].reshape(-1, 2).T
+    # print(jnp.allclose(known_data[1].reshape(-1), iq_data[1][a, b]))
+    print("rb",  known_data[1].reshape(-1)[:3521].sum())
+    # for i in known_data[1].reshape(-1):
+        # print(i, end=" ")
+    print("rb", rbf_2d(phi, new_phi_xt, known_data[1]))
+    result_xt_flat = jax.lax.map(
+        lambda x: rbf_2d(phi, new_phi_xt, x), known_data
+    )
     # result_xt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_xt, new_phi_xt, known_value_xt_flat)
-
-    # f_rec_xt = result_xt_flat.reshape(x_dim, z_dim, -1)  # 恢复 (x,z,t)
-    f_rec_xt = jnp.transpose(result_xt_flat.reshape(z_dim, x_dim, -1), (1, 0, 2))  # 恢复 (x,z,t)
+    # result_xt_flat = jax.lax.map(
+    #     lambda x: solve(known_coords_xt, unknown_coords_xt, x, epsilon),
+    #     jnp.transpose(known_data, (1, 0, 2)),
+    #     batch_size=5,
+    # )
+    f_rec_xt = result_xt_flat.reshape(z_dim, x_dim, -1)  # 恢复 (x,z,t)
+    # f_rec_xt = jnp.transpose(result_xt_flat.reshape(z_dim, x_dim, -1), (1, 0, 2))  # 恢复 (x,z,t)
     print("x-t 平面处理完成。")
 
-    # --- 3. 处理 z-t 平面 (并行处理所有x切片) ---
     print("开始并行处理 z-t 平面...")
-    all_coords_zt = solve_coords(z_dim, t_dim)
-
+    all_coords_zt = solve_coords(z_dim, t_dim).astype(jnp.float32) / jnp.array([z_dim, t_dim], dtype=jnp.float32)
+    print("coords", all_coords_zt.shape)
     known_coords_zt = all_coords_zt[:, known_t].reshape(-1, 2)
-    unknown_coords_zt = all_coords_zt[:, unknown_t].reshape(-1, 2)
+    print("coords1", known_coords_zt.shape)
+    
+    unknown_coords_zt = all_coords_zt[:, unknown_t]
+    unknow_shape_zt = unknown_coords_zt.shape
+    print("unknow", known_data.shape, unknow_shape_zt)
+    unknown_coords_zt = unknown_coords_zt.reshape(-1, 2)
+    print(known_coords_zt)
 
-    inv_phi_zt, new_phi_zt = solve_phi(known_coords_zt, unknown_coords_zt, epsilon)
-
-    # known_value_zt_flat = iq_data[:, :, known_t].reshape(x_dim, -1)  # -> (z, x, t)
-    result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_zt, new_phi_zt, iq_data[:, :, known_t])
-    # result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_zt, new_phi_zt, known_value_zt_flat)
-    # .block_until_ready()
-
-    f_rec_zt = result_zt_flat.reshape(x_dim, z_dim, -1)
+    phi, inv_phi_zt, new_phi_zt = solve_phi(known_coords_zt, unknown_coords_zt, epsilon)
+    print("phi", phi)
+    # print("rr", rbf_2d(inv_phi_zt, new_phi_zt, known_data[:, 1, :]).block_until_ready())
+    result_zt_flat = jax.lax.map(
+        lambda x: rbf_2d(phi, new_phi_zt, x), jnp.transpose(known_data, (1, 0, 2))
+    )
+    print(result_zt_flat.shape)
+    f_rec_zt = result_zt_flat.reshape(z_dim, x_dim, -1)
     print("x-t 平面处理完成。")
-
     # --- 4. 合并结果 ---
     print("合并结果...")
     # final_reconstruction =
@@ -181,9 +248,12 @@ def brain(
             cube = cube.at[:, :, :first_N].set(iq_full[:, :, :first_N])
         case _:
             raise ValueError("mode must be 'down_fps' or 'cr'")
+    print(cube[:, :, 0])
     t1 = time.time()
     print(f"处理 {path}，模式: {mode}，原始帧率: {orig_fps}，目标帧率: {down_fps}，CR: {cr} {t1}")
-    iq_rec = rbf_2x2d_interpolate_3d_vmap(cube, 1e4).block_until_ready()
+    iq_rec = rbf_2x2d_interpolate_3d_vmap(cube.real, 1e4).block_until_ready()
+    # iq_rec_imag = rbf_2x2d_interpolate_3d_vmap(cube.imag, 1e4).block_until_ready()
+    # iq_rec = iq_rec + 1j * iq_rec_imag
     print(f"插值完成，重建数据形状: {iq_rec.shape} {time.time() - t1}")
     # iq_rec = interp_cube(cube, args.eps, args.lam, device, args.batch)
     # out_f = os.path.join(args.out_path, fname)
@@ -194,11 +264,15 @@ def brain(
 # --- 主程序：使用新的高性能函数 ---
 if __name__ == "__main__":
     plt.rcParams["font.sans-serif"] = ["Source Han Sans"]
-    jax.config.update("jax_compilation_cache_dir", "jax_cache")
+    # jax.config.update("jax_compilation_cache_dir", "jax_cache")
     # test()
-    # outdir = r"data\Result"
-    # for d in Path(r"data\PALA_data_InVivoRatBrain\IQ").glob("*.mat"):
+    # outdir = Path(r"data/PALA_data_InVivoRatBrain/Results-down_fps-500")
+    # for d in Path(r"data/PALA_data_InVivoRatBrain/IQ").glob("*.mat"):
     #     print(f"Processing {d.name}...")
-    d = r"data\PALA_data_InVivoRatBrain\IQ\PALA_InVivoRatBrain_001.mat"
-    outdir = Path(r"data\PALA_data_InVivoRatBrain\Results")
+    #     brain(d, outdir, mode="down_fps", orig_fps=1000, down_fps=500)
+    # d = r"data\PALA_data_InVivoRatBrain\IQ\PALA_InVivoRatBrain_001.mat"
+
+    # outdir = Path(r"data\PALA_data_InVivoRatBrain\Results")
+    d = "data/PALA_InVivoRatBrain_001.mat"
+    outdir = Path(r"data")
     brain(d, outdir, mode="down_fps", orig_fps=1000, down_fps=100)

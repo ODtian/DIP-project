@@ -33,6 +33,7 @@ def solve_coeff(coords: torch.Tensor, values: torch.Tensor, eps: float, lam: flo
     phi = mq_kernel(r, eps)
     if lam > 0:
         phi += lam * torch.eye(phi.size(0), device=coords.device)
+    print("phi", phi)
     return torch.linalg.solve(phi, values)
 
 
@@ -50,16 +51,21 @@ def rbf2d_fill(grid: np.ndarray, eps: float, lam: float, device: str, batch: int
     norm = known_idx.astype(np.float32)
     norm[:, 0] /= h
     norm[:, 1] /= w  # 归一化坐标
-
+    print("norm", norm)
     c_t = torch.tensor(norm, device=device)
     v_t = torch.tensor(vals, device=device)
+    print("vt", grid)
+    # for i in vals:
+    #     print(i)
+    print("vt", vals[:3521].sum())
     w_t = solve_coeff(c_t, v_t, eps, lam)  # 权重
-
+    print("wt", w_t)
     # 目标网格
     ij_all = np.indices((h, w)).reshape(2, -1).T
     norm_all = ij_all.astype(np.float32)
     norm_all[:, 0] /= h
     norm_all[:, 1] /= w
+    print(norm_all.shape)
     p_t = torch.tensor(norm_all, device=device)
 
     flat_out = grid.ravel()
@@ -81,13 +87,16 @@ def interp_cube(iq_nan: np.ndarray, eps: float, lam: float, device: str, batch: 
         rec_xt = np.empty_like(channel)
         for zi in tqdm(range(z), desc="x-t", leave=False):
             rec_xt[zi] = rbf2d_fill(channel[zi], eps, lam, device, batch)  # (X,T)
+            if zi == 1:
+                print("rec", rec_xt[zi].shape)
 
         rec_zt = np.empty_like(channel)
         for xi in tqdm(range(x), desc="z-t", leave=False):
             rec_zt[:, xi, :] = rbf2d_fill(channel[:, xi, :].T, eps, lam, device, batch).T
         return 0.5 * (rec_xt + rec_zt)
 
-    return _fill(real) + 1j * _fill(imag)
+    return _fill(real) 
+# + 1j * _fill(imag)
 
 
 # ---------------- CLI ---------------------------------------------------------
@@ -136,7 +145,8 @@ def main():
         else:  # CR 模式
             first_N = iq_full.shape[2] // args.cr
             cube[:, :, :first_N] = iq_full[:, :, :first_N]
-
+        print(cube[:, : ,0])
+        print()
         iq_rec = interp_cube(cube, args.eps, args.lam, device, args.batch)
         out_f = os.path.join(args.out_path, fname)
         sio.savemat(out_f, {"IQ": iq_rec, "UF": uf, "PData": pdata})
