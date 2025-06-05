@@ -7,8 +7,8 @@ interp_2x2d_rbf.py  – 2×2 D RBF interpolation for CS270 Project-4   (2025-06-
 • 立方体维度约定： (Z, X, T)  ↔  (深度, 横向, 帧) —— 与 PALA 原始 IQ 一致。
 
 python interp_2x2d_rbf.py `
-  --mats_path "datasets\PALA_data_InVivoRatBrain_part1\PALA_data_InVivoRatBrain\IQ" `
-  --out_path  "datasets\PALA_data_InVivoRatBrain_part1\PALA_data_InVivoRatBrain\Results\DS10_100Hz" `
+  --mats_path "datasets/PALA_data_InVivoRatBrain_part1/PALA_data_InVivoRatBrain/IQ" `
+  --out_path  "datasets/PALA_data_InVivoRatBrain_part1/PALA_data_InVivoRatBrain/Results/DS10_100Hz" `
   --orig_fps 1000 `
   --down_fps 100 `
   --gpu
