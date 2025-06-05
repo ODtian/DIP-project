@@ -1,6 +1,7 @@
 from functools import partial
 from os import PathLike
 from pathlib import Path
+import time
 from typing import Literal
 
 import jax
@@ -153,7 +154,8 @@ def test(x_dim=200, z_dim=300, t_dim=50):
 
 
 def brain(
-    path: str,
+    path: str | PathLike,
+    outdir: Path,
     mode: Literal["down_fps", "cr"] = "down_fps",
     orig_fps: int = 1000,
     down_fps: int = 100,
@@ -179,15 +181,24 @@ def brain(
             cube = cube.at[:, :, :first_N].set(iq_full[:, :, :first_N])
         case _:
             raise ValueError("mode must be 'down_fps' or 'cr'")
-    iq_rec = rbf_2x2d_interpolate_3d_vmap(cube, 1e4)
+    t1 = time.time()
+    print(f"处理 {path}，模式: {mode}，原始帧率: {orig_fps}，目标帧率: {down_fps}，CR: {cr} {t1}")
+    iq_rec = rbf_2x2d_interpolate_3d_vmap(cube, 1e4).block_until_ready()
+    print(f"插值完成，重建数据形状: {iq_rec.shape} {time.time() - t1}")
     # iq_rec = interp_cube(cube, args.eps, args.lam, device, args.batch)
     # out_f = os.path.join(args.out_path, fname)
 
-    sio.savemat(Path(path).with_suffix(".2x2rdf.mat"), {"IQ": iq_rec, "UF": uf, "PData": pdata})
+    sio.savemat(outdir / Path(path).with_suffix(".2x2rdf.mat").name, {"IQ": iq_rec, "UF": uf, "PData": pdata})
 
 
 # --- 主程序：使用新的高性能函数 ---
 if __name__ == "__main__":
-    # plt.rcParams["font.sans-serif"] = ["Source Han Sans"]
+    plt.rcParams["font.sans-serif"] = ["Source Han Sans"]
+    jax.config.update("jax_compilation_cache_dir", "jax_cache")
     # test()
-    brain("data/PALA_InVivoRatBrain_001.mat")
+    # outdir = r"data\Result"
+    # for d in Path(r"data\PALA_data_InVivoRatBrain\IQ").glob("*.mat"):
+    #     print(f"Processing {d.name}...")
+    d = r"data\PALA_data_InVivoRatBrain\IQ\PALA_InVivoRatBrain_001.mat"
+    outdir = Path(r"data\PALA_data_InVivoRatBrain\Results")
+    brain(d, outdir, mode="down_fps", orig_fps=1000, down_fps=100)
