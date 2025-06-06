@@ -22,9 +22,9 @@ def multiquadric_kernel(r, epsilon):
 
 # @jax.jit
 def rbf_2d(inv_phi: jnp.ndarray, new_phi: jnp.ndarray, know_values: jnp.ndarray):
-    # weights = inv_phi @ know_values.reshape(-1)
-    weights = jnp.linalg.solve(inv_phi, know_values.reshape(-1))
-    print("weight", weights)
+    weights = inv_phi @ know_values.reshape(-1)
+    # weights = jnp.linalg.solve(inv_phi, know_values.reshape(-1))
+    # print("weight", weights)
     # .flatten()
     reconstructed_values = new_phi @ weights
     return reconstructed_values
@@ -40,7 +40,8 @@ def solve_phi(
 
     new_dist = jnp.linalg.norm(unknown_coords[:, None, :] - known_coords[None, :, :], axis=-1)
     new_phi = multiquadric_kernel(new_dist, epsilon)
-    return phi, inv_phi, new_phi
+    return inv_phi, new_phi
+
 
 @jax.jit
 def solve(known_coords: jnp.ndarray, unknown_coords: jnp.ndarray, know_values: jnp.ndarray, epsilon: float):
@@ -88,68 +89,45 @@ def rbf_2x2d_interpolate_3d_vmap(iq_data: jnp.ndarray, epsilon: float) -> jnp.nd
 
     print("开始并行处理 x-t 平面...")
     known_data = iq_data[:, :, known_t]
-    # unknown_data_shape = iq_data[:, :, unknown_t].shape
-    # print("un", unknown_data_shape)
-    # --- 3. 处理 z-t 平面 (并行处理所有x切片) ---
-    # known_value_zt_flat = iq_data[:, :, known_t].reshape(x_dim, -1)  # -> (z, x, t)
-    # result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_zt, new_phi_zt, known_data)
-    # result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_zt, new_phi_zt, known_value_zt_flat)
-    # .block_until_ready()
 
-    # result_zt_flat = jax.lax.map(
-    #     lambda x: solve(known_coords_zt, unknown_coords_zt, x, epsilon),
-    #     known_data,
-    #     batch_size=5,
-    # )
-
-
-    all_coords_xt = solve_coords(x_dim, t_dim).astype(jnp.float32) / jnp.array([x_dim, t_dim], dtype=jnp.float32)
+    all_coords_xt = solve_coords(x_dim, t_dim).astype(jnp.float32) / jnp.array(
+        [x_dim, t_dim], dtype=jnp.float32
+    )
+    print(all_coords_xt)
     known_coords_xt = all_coords_xt[:, known_t].reshape(-1, 2)
     unknown_coords_xt = all_coords_xt[:, unknown_t].reshape(-1, 2)
     # known_value_xt_flat = jnp.transpose(iq_data[:, :, known_t], (1, 0, 2)).reshape(z_dim, -1)  # -> (z, x, t)
     # b. 预计算昂贵的RBF矩阵 (只计算一次)
-    phi, inv_phi_xt, new_phi_xt = solve_phi(known_coords_xt, unknown_coords_xt, epsilon)
-    print(phi)
-    # result_xt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 1))(inv_phi_xt, new_phi_xt, known_data)
-    a, b = solve_coords(x_dim, t_dim)[:, known_t].reshape(-1, 2).T
-    # print(jnp.allclose(known_data[1].reshape(-1), iq_data[1][a, b]))
-    print("rb",  known_data[1].reshape(-1)[:3521].sum())
-    # for i in known_data[1].reshape(-1):
-        # print(i, end=" ")
-    print("rb", rbf_2d(phi, new_phi_xt, known_data[1]))
-    result_xt_flat = jax.lax.map(
-        lambda x: rbf_2d(phi, new_phi_xt, x), known_data
-    )
-    # result_xt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_xt, new_phi_xt, known_value_xt_flat)
+    inv_phi_xt, new_phi_xt = solve_phi(known_coords_xt, unknown_coords_xt, epsilon)
+    result_xt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 0))(inv_phi_xt, new_phi_xt, known_data)
+    # result_xt_flat = jax.lax.map(lambda x: rbf_2d(inv_phi_xt, new_phi_xt, x), known_data)
+    # print(jnp.mean(result_xt_flat))
+    # print(jnp.mean(result_xt_flat1))
+    # print(jnp.allclose(result_xt_flat, result_xt_flat1))
     # result_xt_flat = jax.lax.map(
     #     lambda x: solve(known_coords_xt, unknown_coords_xt, x, epsilon),
     #     jnp.transpose(known_data, (1, 0, 2)),
     #     batch_size=5,
     # )
-    f_rec_xt = result_xt_flat.reshape(z_dim, x_dim, -1)  # 恢复 (x,z,t)
+    f_rec_xt = result_xt_flat.reshape((z_dim, x_dim, -1))  # 恢复 (x,z,t)
     # f_rec_xt = jnp.transpose(result_xt_flat.reshape(z_dim, x_dim, -1), (1, 0, 2))  # 恢复 (x,z,t)
     print("x-t 平面处理完成。")
 
     print("开始并行处理 z-t 平面...")
-    all_coords_zt = solve_coords(z_dim, t_dim).astype(jnp.float32) / jnp.array([z_dim, t_dim], dtype=jnp.float32)
-    print("coords", all_coords_zt.shape)
+    all_coords_zt = solve_coords(z_dim, t_dim).astype(jnp.float32) / jnp.array(
+        [z_dim, t_dim], dtype=jnp.float32
+    )
     known_coords_zt = all_coords_zt[:, known_t].reshape(-1, 2)
-    print("coords1", known_coords_zt.shape)
-    
-    unknown_coords_zt = all_coords_zt[:, unknown_t]
-    unknow_shape_zt = unknown_coords_zt.shape
-    print("unknow", known_data.shape, unknow_shape_zt)
-    unknown_coords_zt = unknown_coords_zt.reshape(-1, 2)
-    print(known_coords_zt)
+    unknown_coords_zt = all_coords_zt[:, unknown_t].reshape(-1, 2)
 
-    phi, inv_phi_zt, new_phi_zt = solve_phi(known_coords_zt, unknown_coords_zt, epsilon)
-    print("phi", phi)
+    inv_phi_zt, new_phi_zt = solve_phi(known_coords_zt, unknown_coords_zt, epsilon)
     # print("rr", rbf_2d(inv_phi_zt, new_phi_zt, known_data[:, 1, :]).block_until_ready())
     result_zt_flat = jax.lax.map(
-        lambda x: rbf_2d(phi, new_phi_zt, x), jnp.transpose(known_data, (1, 0, 2))
+        lambda x: rbf_2d(inv_phi_zt, new_phi_zt, x), jnp.transpose(known_data, (1, 0, 2))
     )
-    print(result_zt_flat.shape)
-    f_rec_zt = result_zt_flat.reshape(z_dim, x_dim, -1)
+    f_rec_zt = jnp.transpose(result_zt_flat.reshape(x_dim, z_dim, -1), (1, 0, 2))
+    # result_zt_flat = jax.vmap(rbf_2d, in_axes=(None, None, 1))(inv_phi_zt, new_phi_zt, known_data)
+    # f_rec_zt = result_zt_flat.reshape(z_dim, x_dim, -1)
     print("x-t 平面处理完成。")
     # --- 4. 合并结果 ---
     print("合并结果...")
@@ -188,20 +166,20 @@ def test(x_dim=200, z_dim=300, t_dim=50):
     print(f"重建后是否还存在NaN值: {jnp.isnan(reconstructed_data_v2).any()}")
 
     # 选择一个中间的x切片进行可视化
-    slice_idx = x_dim // 2
+    slice_idx = 15
 
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
     fig.suptitle(f"2x2D RBF 插值结果 (t切片索引: {slice_idx})", fontsize=16)
 
     # 原始数据
-    im1 = axes[0].imshow(ground_truth_data[slice_idx, :, :], aspect="auto", cmap="viridis", origin="lower")
+    im1 = axes[0].imshow(ground_truth_data[:, :, slice_idx], aspect="auto", cmap="viridis", origin="lower")
     axes[0].set_title("原始数据 (Ground Truth)")
     axes[0].set_ylabel("Z 轴")
     fig.colorbar(im1, ax=axes[0], label="信号强度")
 
     # 带有NaN的稀疏数据
     im2 = axes[1].imshow(
-        jnp.nan_to_num(sparse_data[slice_idx, :, :]), aspect="auto", cmap="viridis", origin="lower"
+        jnp.nan_to_num(sparse_data[:, :, slice_idx]), aspect="auto", cmap="viridis", origin="lower"
     )
     axes[1].set_title(f"稀疏数据 (每 {downsample_factor} 帧保留一帧)")
     axes[1].set_ylabel("Z 轴")
@@ -209,7 +187,7 @@ def test(x_dim=200, z_dim=300, t_dim=50):
 
     # 重建后的数据
     im3 = axes[2].imshow(
-        reconstructed_data_v2[slice_idx, :, :], aspect="auto", cmap="viridis", origin="lower"
+        reconstructed_data_v2[:, :, slice_idx], aspect="auto", cmap="viridis", origin="lower"
     )
     axes[2].set_title("使用 2x2D RBF 插值重建后的数据")
     axes[2].set_ylabel("Z 轴")
@@ -218,6 +196,9 @@ def test(x_dim=200, z_dim=300, t_dim=50):
 
     plt.tight_layout(rect=(0, 0, 1, 0.96))
     plt.show()
+    # plt.savefig("rbf_interp_result.png", dpi=200)
+    # plt.close()
+    # print("图片已保存为 rbf_interp_result.png")
 
 
 def brain(
@@ -228,9 +209,10 @@ def brain(
     down_fps: int = 100,
     cr: int = 10,
 ):
-    mat = sio.loadmat(path)
-    iq_full = mat["IQ"].astype(jnp.complex64)
-    uf, pdata = mat.get("UF"), mat.get("PData")
+    # mat = sio.loadmat(path)
+    # iq_full = mat["IQ"].astype(jnp.complex64)
+    iq_full = jnp.arange(180).reshape((3, 3, 20))
+    # uf, pdata = mat.get("UF"), mat.get("PData")
 
     # cube = np.full_like(iq_full, np.nan, dtype=np.complex64)
     # if args.down_fps:
@@ -258,7 +240,7 @@ def brain(
     # iq_rec = interp_cube(cube, args.eps, args.lam, device, args.batch)
     # out_f = os.path.join(args.out_path, fname)
 
-    sio.savemat(outdir / Path(path).with_suffix(".2x2rdf.mat").name, {"IQ": iq_rec, "UF": uf, "PData": pdata})
+    # sio.savemat(outdir / Path(path).with_suffix(".2x2rdf.mat").name, {"IQ": iq_rec, "UF": uf, "PData": pdata})
 
 
 # --- 主程序：使用新的高性能函数 ---
@@ -273,6 +255,7 @@ if __name__ == "__main__":
     # d = r"data\PALA_data_InVivoRatBrain\IQ\PALA_InVivoRatBrain_001.mat"
 
     # outdir = Path(r"data\PALA_data_InVivoRatBrain\Results")
-    d = "data/PALA_InVivoRatBrain_001.mat"
-    outdir = Path(r"data")
-    brain(d, outdir, mode="down_fps", orig_fps=1000, down_fps=100)
+    # d = "data/PALA_InVivoRatBrain_001.mat"
+    # outdir = Path(r"data")
+    # brain(d, outdir, mode="down_fps", orig_fps=1000, down_fps=100)
+    test()
